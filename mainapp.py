@@ -3,157 +3,95 @@ from PIL import Image
 from ultralytics import YOLO
 import cv2
 import os
-import shutil
+import requests
+from datetime import datetime
+import csv
 
-# Memuat model YOLO
-model = YOLO('model/best.pt')
+# ------------------------------
+# KONFIGURASI
+# ------------------------------
+ESP32_IP = "http://192.168.1.13"  # Ganti IP sesuai ESP32-CAM kamu
+ESP32_STREAM_URL = f"{ESP32_IP}/stream"
+MODEL_PATH = "model/best.pt"  # Ganti jika beda path model
 
-@st.cache_data
-def proses_gambar(file_unggah, _model, ambang_keyakinan):
-    # Membaca gambar
-    gambar = Image.open(file_unggah)
+# ------------------------------
+# MUAT MODEL YOLO
+# ------------------------------
+model = YOLO(MODEL_PATH)
 
-    # Menjalankan inferensi dengan ambang keyakinan yang diberikan
-    hasil = _model(gambar, conf=ambang_keyakinan)
-    for hasil_deteksi in hasil:
-        hasil_deteksi.save(filename='hasil.jpg')
-
-    # Membuka hasil deteksi
-    hasil_gambar = Image.open('hasil.jpg')
-    return hasil_gambar
-
-
-def simpan_file_unggah(file_unggah):
-    # Menyimpan file unggahan video
-    nama_file = "video_sample.mp4"
-    os.makedirs("uploads", exist_ok=True)
-    with open(os.path.join("uploads", nama_file), "wb") as f:
-        f.write(file_unggah.getbuffer())
-    return os.path.join("uploads", nama_file)
-
-
-def hapus_direktori(direktori):
-    # Menghapus isi direktori jika ada
-    if os.path.exists(direktori):
-        shutil.rmtree(direktori)
-
-
-def tampilkan_frame_deteksi(ambang, model, st_frame, gambar, tampilkan_pelacakan=None, pelacak=None):
-    # Menampilkan hasil deteksi atau pelacakan pada frame video
-    if tampilkan_pelacakan:
-        hasil = model.track(gambar, conf=ambang, persist=True, tracker=pelacak)
+# ------------------------------
+# FUNGSI: Kirim perintah ke ESP32
+# ------------------------------
+def kirim_perintah_ke_esp32(labels):
+    required_classes = {'Hardhat', 'Mask', 'Vest'}
+    detected = set([label for label in labels if label in required_classes])
+    
+    if not labels:
+        # Tidak ada deteksi apapun
+        requests.get(f"{ESP32_IP}/kosong")
+        log_deteksi("Tidak Ada Objek", [])
+    elif detected == required_classes:
+        # Semua APD lengkap
+        requests.get(f"{ESP32_IP}/apd_lengkap")
+        log_deteksi("Lengkap", labels)
     else:
-        hasil = model.predict(gambar, conf=ambang)
+        # APD tidak lengkap
+        requests.get(f"{ESP32_IP}/apd_tidak_lengkap")
+        log_deteksi("Tidak Lengkap", labels)
+
+
+# ------------------------------
+# FUNGSI: Logging
+# ------------------------------
+def log_deteksi(status, labels):
+    os.makedirs("logs", exist_ok=True)
+    log_path = "logs/log_deteksi.csv"
+    with open(log_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        writer.writerow([waktu, status, ",".join(labels)])
+
+# ------------------------------
+# FUNGSI: Deteksi dan tampilkan
+# ------------------------------
+def tampilkan_frame_deteksi(ambang, model, st_frame, frame):
+    hasil = model.predict(frame, conf=ambang)
+    names = model.names  # index ke nama class
+    label_indices = hasil[0].boxes.cls.tolist()
+    labels = [names[int(i)] for i in label_indices]
+
+    kirim_perintah_ke_esp32(labels)
 
     hasil_plot = hasil[0].plot()
-    st_frame.image(hasil_plot,
-                   caption='Hasil Deteksi Video',
-                   channels="BGR",
-                   use_column_width=True
-                   )
+    st_frame.image(hasil_plot, caption='Hasil Deteksi APD', channels="BGR", use_column_width=True)
 
-
+# ------------------------------
+# FUNGSI UTAMA STREAMLIT
+# ------------------------------
 def main():
-    # Opsi sidebar
-    st.sidebar.title("Pengaturan")
-    tipe_input = st.sidebar.radio("Pilih Jenis Input:", ["Gambar", "Video", "Webcam"])
+    st.set_page_config(page_title="Deteksi APD ESP32-CAM", layout="centered")
+    st.title("🚨 Deteksi Alat Pelindung Diri (APD)")
+    st.markdown("Sistem deteksi APD real-time dari ESP32-CAM menggunakan YOLO dan Streamlit.")
 
-    # Bagian ambang keyakinan
-    st.sidebar.title("Ambang Keyakinan")
-    st.sidebar.write("""
-        Sesuaikan ambang keyakinan untuk mengontrol sensitivitas deteksi:
-        - **Keyakinan Tinggi (0.7 - 1.0):** Deteksi lebih ketat dan akurat.
-        - **Keyakinan Sedang (0.5 - 0.7):** Keseimbangan antara akurasi dan deteksi.
-        - **Keyakinan Rendah (0.3 - 0.5):** Lebih banyak deteksi tetapi mungkin ada kesalahan positif.
-    """)
+    st.sidebar.header("⚙️ Pengaturan")
     ambang_keyakinan = st.sidebar.slider(
-        "Atur Ambang Keyakinan",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.5,
-        step=0.05,
-        help="Atur nilai ini untuk menyeimbangkan antara akurasi dan deteksi."
+        "Ambang Keyakinan Deteksi", min_value=0.0, max_value=1.0, value=0.5, step=0.05
     )
 
-    if ambang_keyakinan > 0.75:
-        st.sidebar.success("Keyakinan Tinggi: Deteksi lebih ketat.")
-    elif 0.5 <= ambang_keyakinan <= 0.75:
-        st.sidebar.info("Keyakinan Sedang: Deteksi seimbang.")
-    else:
-        st.sidebar.warning("Keyakinan Rendah: Mungkin ada kesalahan deteksi.")
-
-    # Aplikasi utama
-    if tipe_input == "Gambar":
-        st.title("Deteksi PPE (Alat Pelindung Diri)")
-        opsi = st.radio(
-            "Pilih Sumber Gambar:",
-            ("Unggah Gambar", "Ambil Gambar"),
-            horizontal=True,
-        )
-
-        if opsi == "Unggah Gambar":
-            file_unggah = st.file_uploader(
-                "Unggah gambar PPE (Alat Pelindung Diri):",
-                type=["jpg", "jpeg", "png"]
-            )
-
-            if file_unggah is not None:
-                hasil_gambar = proses_gambar(file_unggah, model, ambang_keyakinan)
-                st.image(hasil_gambar, caption='Hasil Deteksi PPE', use_column_width=True)
-
-        elif opsi == "Ambil Gambar":
-            gambar = st.camera_input("Ambil gambar menggunakan webcam:")
-            if gambar is not None:
-                hasil_gambar = proses_gambar(gambar, model, ambang_keyakinan)
-                st.image(hasil_gambar, caption='Hasil Deteksi PPE', use_column_width=True)
-
-    elif tipe_input == "Video":
-        # Menghapus direktori unggahan
-        hapus_direktori("uploads")
-        st.title("Unggah Video untuk Deteksi PPE")
-        file_video = st.file_uploader(
-            "Unggah video (Max 10MB):",
-            type=["mp4"]
-        )
-
-        if file_video is not None:
-            simpan_file_unggah(file_video)
-            video_bytes = file_video.read()
-            st.video(video_bytes)
-            st.write("Memproses video untuk deteksi, harap tunggu...")
-            try:
-                vid_cap = cv2.VideoCapture('uploads/video_sample.mp4')
-                st_frame = st.empty()
-                while vid_cap.isOpened():
-                    sukses, gambar = vid_cap.read()
-                    if sukses:
-                        tampilkan_frame_deteksi(ambang_keyakinan, model, st_frame, gambar)
-                    else:
-                        vid_cap.release()
-                        break
-            except Exception as e:
-                st.sidebar.error(f"Kesalahan dalam memproses video: {str(e)}")
-
-    elif tipe_input == "Webcam":
-        st.title("Deteksi PPE Menggunakan Webcam")
-        st.write("Menyiapkan webcam untuk deteksi, harap tunggu...")
-
-        sumber_webcam = st.sidebar.radio("Pilih Sumber Kamera:", ["Webcam", "Kamera USB"])
-        sumber_webcam = 0 if sumber_webcam == "Webcam" else 1
-
+    if st.button("▶️ Mulai Deteksi dari ESP32-CAM"):
         try:
-            vid_cap = cv2.VideoCapture(sumber_webcam)
+            cap = cv2.VideoCapture(ESP32_STREAM_URL)
             st_frame = st.empty()
-            while vid_cap.isOpened():
-                sukses, gambar = vid_cap.read()
-                if sukses:
-                    tampilkan_frame_deteksi(ambang_keyakinan, model, st_frame, gambar)
-                else:
-                    vid_cap.release()
-                    break
-        except Exception as e:
-            st.sidebar.error(f"Kesalahan dalam penggunaan webcam: {str(e)}")
 
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    st.warning("Gagal membaca stream dari ESP32-CAM.")
+                    break
+                tampilkan_frame_deteksi(ambang_keyakinan, model, st_frame, frame)
+
+        except Exception as e:
+            st.error(f"Terjadi kesalahan saat koneksi ESP32-CAM: {e}")
 
 if __name__ == "__main__":
     main()

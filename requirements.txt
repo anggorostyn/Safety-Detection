@@ -1,4 +1,8 @@
-streamlit
-ultralytics
-Pillow
-opencv-python-headless
+streamlit==1.31.0
+ultralytics==8.3.65
+torch==2.6.0
+torchvision==0.21.0
+opencv-python==4.11.0.86
+pillow==10.3.0
+fastapi
+uvicorn
